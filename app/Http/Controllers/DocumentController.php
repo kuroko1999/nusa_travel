@@ -28,7 +28,7 @@ class DocumentController extends Controller
             return null;
         }
 
-return 'data:'.Storage::disk('public')->mimeType($path).';base64,'.base64_encode(Storage::disk('public')->get($path));
+        return 'data:'.Storage::disk('public')->mimeType($path).';base64,'.base64_encode(Storage::disk('public')->get($path));
     }
 
     private function qr(string $value): string

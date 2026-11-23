@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\OperationalRequest;
 use App\Models\AuditLog;
 use App\Models\BankAccount;
+use App\Models\BookingPassenger;
 use App\Models\Driver;
 use App\Models\Schedule;
 use App\Models\TravelRoute;
@@ -96,8 +97,12 @@ class OperationalController extends Controller
             $data['arrives_at'] = $end;
         }
         if ($model === Vehicle::class) {
-            if ($item->exists && $item->capacity != $data['capacity'] && Schedule::where('vehicle_id', $item->id)->exists()) {
-                throw ValidationException::withMessages(['capacity' => 'Kapasitas tidak dapat diubah saat ada jadwal mendatang.']);
+            if ($item->exists && $item->capacity != $data['capacity']) {
+                $jadwalMendatang = Schedule::where('vehicle_id', $item->id)->where('departs_at', '>', now())->whereNotIn('status', ['dibatalkan'])->exists();
+                $kursiDipakai = BookingPassenger::whereIn('vehicle_seat_id', $item->seats()->pluck('id'))->exists();
+                if ($jadwalMendatang || $kursiDipakai) {
+                    throw ValidationException::withMessages(['capacity' => 'Kapasitas tidak dapat diubah selama masih ada jadwal mendatang atau kursi yang pernah dipesan.']);
+                }
             }
             unset($data['photo']);
             if ($request->hasFile('photo')) {
@@ -135,18 +140,22 @@ class OperationalController extends Controller
         }
         $data = $request->validate(['seats' => 'required|array', 'seats.*.number' => 'required|string|max:12', 'seats.*.row' => 'required|integer|min:0|max:9', 'seats.*.column' => 'required|integer|min:0|max:5', 'seats.*.selectable' => 'required|boolean']);
         $seats = $data['seats'];
-        if (count($seats) !== $vehicle->seats->count() || count(array_unique(array_column($seats, 'number'))) !== count($seats) || count(array_unique(array_map(fn ($s) => $s['row'].'-'.$s['column'], $seats))) !== count($seats)) {
-            throw ValidationException::withMessages(['seats' => 'Jumlah, nomor, dan posisi kursi harus valid dan unik.']);
+        $idKursi = array_map('intval', array_keys($seats));
+        if (count($seats) !== $vehicle->seats->count() || array_diff($idKursi, $vehicle->seats->pluck('id')->all())) {
+            throw ValidationException::withMessages(['seats' => 'Data kursi tidak sesuai dengan kendaraan ini. Muat ulang halaman lalu coba lagi.']);
+        }
+        if (count(array_unique(array_column($seats, 'number'))) !== count($seats) || count(array_unique(array_map(fn ($s) => $s['row'].'-'.$s['column'], $seats))) !== count($seats)) {
+            throw ValidationException::withMessages(['seats' => 'Nomor dan posisi kursi harus unik.']);
         }
         if (collect($seats)->where('selectable', 1)->count() !== $vehicle->capacity) {
             throw ValidationException::withMessages(['seats' => 'Jumlah kursi penumpang harus sama dengan kapasitas kendaraan.']);
         }
         DB::transaction(function () use ($vehicle, $seats) {
+            // Fase 1: pindahkan semua kursi ke posisi sementara agar tidak bentrok dengan unique index (vehicle_id, row, column).
             foreach (array_keys($seats) as $index => $seatId) {
-                $existing = $vehicle->seats->firstWhere('id', (int) $seatId);
-                abort_unless($existing, 422);
-                $existing->update(['number' => 'TMP-'.$seatId, 'row' => 99, 'column' => $index]);
+                $vehicle->seats->firstWhere('id', (int) $seatId)->update(['number' => 'TMP-'.$seatId, 'row' => 99, 'column' => $index]);
             }
+            // Fase 2: tulis posisi final.
             foreach ($seats as $seatId => $seat) {
                 $vehicle->seats->firstWhere('id', (int) $seatId)->update($seat);
             }
@@ -165,6 +174,6 @@ class OperationalController extends Controller
             return back()->withErrors(['delete' => 'Data masih digunakan. Nonaktifkan statusnya.']);
         }
 
-return back()->with('status','Data dihapus.');
+        return back()->with('status', 'Data dihapus.');
     }
 }

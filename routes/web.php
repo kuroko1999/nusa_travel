@@ -33,6 +33,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/akun/dokumen/{type}', [BookingController::class, 'documents'])->name('customer.documents');
     Route::get('/profil', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::put('/profil', [ProfileController::class, 'update'])->name('profile.update');
+    Route::put('/profil/kata-sandi', [ProfileController::class, 'password'])->middleware('throttle:5,1')->name('profile.password');
     Route::get('/akun', [BookingController::class, 'index'])->name('customer.dashboard');
     Route::post('/pesanan/{booking}/ulasan', [ReviewController::class, 'store'])->name('reviews.store');
 });
@@ -72,6 +73,6 @@ Route::prefix('admin')->name('admin.')->middleware(['auth', 'super_admin'])->gro
     Route::get('/pelanggan', [ManagementController::class, 'customers'])->name('customers');
     Route::get('/pengaturan', [ManagementController::class, 'settings'])->name('settings');
     Route::post('/pengaturan', [ManagementController::class, 'saveSettings'])->name('settings.save');
-    Route::post('/pemesanan/{booking}/status',[ManagementController::class, 'status'])->name('bookings.status');
-    Route::post('/pemesanan/{booking}/checkin',[ManagementController::class, 'checkin'])->name('checkin');
+    Route::post('/pemesanan/{booking}/status', [ManagementController::class, 'status'])->name('bookings.status');
+    Route::post('/pemesanan/{booking}/checkin', [ManagementController::class, 'checkin'])->name('checkin');
 });

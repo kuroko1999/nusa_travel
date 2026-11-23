@@ -9,6 +9,7 @@ use App\Models\Payment;
 use App\Models\Setting;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
@@ -60,9 +61,16 @@ class PaymentService
     {
         return DB::transaction(function () use ($payment) {
             $payment = Payment::whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            if ($payment->status === 'lunas') {
+                // Notifikasi ulang webhook atau persetujuan ganda untuk pembayaran yang sama: cukup kembalikan faktur yang sudah ada.
+                return Invoice::where('booking_id', $payment->booking_id)->firstOrFail();
+            }
             $booking = Booking::with(['schedule.route', 'schedule.vehicle', 'passengers.seat', 'user'])->whereKey($payment->booking_id)->lockForUpdate()->firstOrFail();
             if ($booking->status === 'dibatalkan' || $booking->status === 'kedaluwarsa' || ($booking->payment_status !== 'lunas' && $booking->expires_at->isPast())) {
                 throw ValidationException::withMessages(['payment' => 'Pesanan sudah kedaluwarsa atau dibatalkan.']);
+            }
+            if ($booking->payment_status === 'lunas') {
+                throw ValidationException::withMessages(['payment' => 'Pesanan sudah lunas melalui pembayaran lain. Selesaikan pengembalian dana secara manual.']);
             }
             if ($payment->amount !== $booking->total) {
                 throw ValidationException::withMessages(['payment' => 'Nominal pembayaran tidak cocok.']);
@@ -107,19 +115,32 @@ class PaymentService
         if (! $key || ! hash_equals(hash('sha512', ($data['order_id'] ?? '').($data['status_code'] ?? '').($data['gross_amount'] ?? '').$key), $data['signature_key'] ?? '')) {
             abort(403);
         }
-        $payment = Payment::where('gateway_order_id', $data['order_id'])->where('method', 'midtrans')->firstOrFail();
+        $payment = Payment::where('gateway_order_id', $data['order_id'])->where('method', 'midtrans')->first();
+        if ($payment === null) {
+            // Midtrans mengulang notifikasi sampai menerima respons 2xx; catat dan akui agar tidak berulang tanpa akhir.
+            Log::warning('Notifikasi Midtrans untuk order yang tidak dikenal diabaikan.', ['order_id' => $data['order_id'] ?? null]);
+
+            return;
+        }
         if ((int) round((float) ($data['gross_amount'] ?? 0)) !== $payment->amount) {
             abort(403);
         }
         $eventKey = hash('sha256', implode('|', [$data['order_id'], $data['transaction_id'] ?? '', $data['transaction_status'] ?? '', $data['fraud_status'] ?? '']));
         DB::transaction(function () use ($payment, $data, $eventKey) {
-            if (DB::table('payment_events')->where('event_key', $eventKey)->exists()) {
+            // Unique index pada event_key menutup balapan antar-notifikasi yang datang bersamaan.
+            $inserted = DB::table('payment_events')->insertOrIgnore(['payment_id' => $payment->id, 'event_key' => $eventKey, 'status' => $data['transaction_status'], 'payload' => json_encode($data), 'created_at' => now(), 'updated_at' => now()]);
+            if ($inserted === 0) {
                 return;
             }
-            DB::table('payment_events')->insert(['payment_id' => $payment->id, 'event_key' => $eventKey, 'status' => $data['transaction_status'], 'payload' => json_encode($data), 'created_at' => now(), 'updated_at' => now()]);
             $status = $data['transaction_status'];
             if (in_array($status, ['settlement', 'capture']) && ($data['fraud_status'] ?? 'accept') === 'accept') {
-                $this->approve($payment);
+                if ($payment->booking->payment_status === 'lunas' && $payment->status !== 'lunas') {
+                    // Dana masuk lewat kanal kedua setelah pesanan lunas: jangan ubah status pesanan, tandai untuk refund manual.
+                    $payment->update(['status' => 'refund']);
+                    Log::warning('Pembayaran Midtrans masuk untuk pesanan yang sudah lunas; ditandai refund.', ['payment_id' => $payment->id, 'booking_id' => $payment->booking_id]);
+                } else {
+                    $this->approve($payment);
+                }
             } elseif (in_array($status, ['refund', 'partial_refund'])) {
                 $payment->update(['status' => 'refund']);
                 $payment->booking->update(['status' => 'dibatalkan', 'payment_status' => 'refund']);

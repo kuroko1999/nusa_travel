@@ -1,1 +1,9 @@
-@extends('layouts.app') @section('title','Profil') @section('content')<div class="page max-w-2xl"><span class="eyebrow">AKUN PELANGGAN</span><h1 class="heading mt-2">Profil Saya</h1><form class="mt-7 space-y-5 rounded-3xl bg-white p-8" method="post">@csrf @method('PUT')<label class="field">Nama lengkap<input name="name" value="{{ old('name',$user->name) }}" required></label><label class="field">Email<input type="email" name="email" value="{{ old('email',$user->email) }}" required></label><label class="field">WhatsApp<input name="phone" value="{{ old('phone',$user->phone) }}" required></label><button class="btn-primary">Simpan profil</button></form></div>@endsection
+@extends('layouts.app')
+@section('title', 'Profil')
+@section('content')
+<div class="page max-w-2xl">
+    <span class="eyebrow">AKUN SAYA</span>
+    <h1 class="heading mt-2">Profil Saya</h1>
+    @include('partials.profile-forms')
+</div>
+@endsection

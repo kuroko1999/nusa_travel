@@ -15,7 +15,7 @@ class ReserveBookingRequest extends FormRequest
     {
         return [
             'schedule_id' => ['required', 'integer', 'exists:schedules,id'],
-            'phone' => ['required', 'string', 'max:30'],
+            'phone' => ['required', 'string', 'max:30', 'regex:/^\+?[0-9][0-9\s\-().]{6,}$/'],
             'pickup_address' => ['required', 'string', 'max:255'],
             'dropoff_address' => ['required', 'string', 'max:255'],
             'notes' => ['nullable', 'string', 'max:1000'],

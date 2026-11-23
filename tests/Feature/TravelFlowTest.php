@@ -15,7 +15,7 @@ use App\Services\BookingService;
 use App\Services\PaymentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
@@ -83,22 +83,20 @@ class TravelFlowTest extends TestCase
         $this->actingAs($other)->get(route('invoices.show', $invoice))->assertForbidden();
     }
 
-    public function test_guest_can_book_and_recover_private_invoice(): void
+    public function test_guest_can_book_and_recover_private_invoice_with_whatsapp_number(): void
     {
         [$schedule, $seat] = $this->journey();
         $this->get(route('schedules.show', $schedule))->assertOk();
         $response = $this->post(route('bookings.store'), $this->data($schedule, [$seat]));
         $booking = Booking::sole();
-        $key = Crypt::decryptString(session('guest_key_'.$booking->id));
 
         $response->assertRedirect(route('bookings.show', $booking));
         $this->assertGuest();
         $this->assertNull($booking->user_id);
-        $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/', $key);
-        $this->assertSame(hash('sha256', $key), $booking->guest_key_hash);
         $this->assertArrayNotHasKey('guest_key_hash', $booking->toArray());
-        $this->get(route('bookings.show', $booking))->assertOk()->assertSee($key);
-        $this->get(route('bookings.show', $booking))->assertOk()->assertDontSee($key);
+        $this->assertSame('08123456789', $booking->phone);
+        $this->get(route('bookings.show', $booking))->assertOk()
+            ->assertSee('08123456789')->assertSee('Cek Booking')->assertDontSee('kunci akses');
         $this->get(route('tickets.pdf', $booking))->assertNotFound();
 
         $this->post(route('payments.choose', $booking), ['method' => 'transfer'])
@@ -126,14 +124,16 @@ class TravelFlowTest extends TestCase
             ->assertDontSee('Penumpang 1')->assertDontSee('08123456789');
 
         $this->from(route('booking.check'))->post(route('booking.recover'), [
-            'code' => $booking->code, 'guest_key' => 'invalid',
-        ])->assertSessionHasErrors('guest_key')->assertSessionMissing('_old_input.guest_key');
+            'code' => $booking->code, 'phone' => '081200000000',
+        ])->assertRedirect(route('booking.check'))->assertSessionHasErrors('code')
+            ->assertSessionMissing('_old_input.phone');
         $this->post(route('booking.recover'), [
-            'code' => $booking->code, 'guest_key' => str_repeat('0', 64),
+            'code' => $booking->code.'X', 'phone' => '08123456789',
         ])->assertRedirect(route('booking.check'))->assertSessionHasErrors('code');
         $this->get(route('invoices.pdf', $invoice))->assertForbidden();
 
-        $this->post(route('booking.recover'), ['code' => $booking->code, 'guest_key' => $key])
+        // Format internasional untuk nomor yang sama tetap membuka pesanan.
+        $this->post(route('booking.recover'), ['code' => $booking->code, 'phone' => '+62 812-3456-789'])
             ->assertRedirect(route('bookings.show', $booking));
         $this->get(route('invoices.pdf', $invoice))->assertOk();
         $this->travel(25)->hours();
@@ -144,6 +144,11 @@ class TravelFlowTest extends TestCase
         foreach (['dashboard', 'bookings', 'payments', 'invoices', 'reports'] as $page) {
             $this->get(route('admin.'.$page))->assertOk()->assertSee('Penumpang 1');
         }
+        // Shell admin tidak memuat header/footer situs publik.
+        $this->get(route('admin.dashboard'))->assertOk()
+            ->assertSee('Panel Admin')->assertDontSee('Cara Pemesanan')->assertDontSee('Jelajahi');
+        $this->get(route('profile.edit'))->assertOk()
+            ->assertSee('Ganti kata sandi')->assertDontSee('Jelajahi');
     }
 
     public function test_unverified_midtrans_notification_is_rejected(): void
@@ -215,6 +220,10 @@ class TravelFlowTest extends TestCase
         $this->post(route('payments.proof', $payment), ['proof' => UploadedFile::fake()->create('bukti.pdf', 10, 'application/pdf')])->assertRedirect();
         $this->actingAs($admin)->post(route('admin.payments.approve', $payment))->assertRedirect();
         $this->assertSame('lunas', $booking->fresh()->payment_status);
+        // Detail pesanan mengikuti shell pengguna: admin tanpa footer publik, pelanggan dengan footer.
+        $this->actingAs($admin)->get(route('bookings.show', $booking))->assertOk()
+            ->assertSee('Panel Admin')->assertDontSee('Jelajahi');
+        $this->actingAs($customer)->get(route('bookings.show', $booking))->assertOk()->assertSee('Jelajahi');
         $other = app(BookingService::class)->reserve($customer->id, $this->data($schedule, [$seat2]));
         $this->actingAs($customer)->post(route('bookings.cancel', $other))->assertRedirect();
         $this->assertSame('dibatalkan', $other->fresh()->status);
@@ -241,8 +250,265 @@ class TravelFlowTest extends TestCase
     {
         [$schedule] = $this->journey();
         $this->get(route('travel.search', ['model' => 'Isuzu Panther']))->assertOk()->assertSee('Panther Test');
-        $this->get(route('travel.search',['model' => 'Toyota Avanza']))->assertOk()->assertDontSee('Panther Test');
-        $this->get(route('travel.search',['passengers' => 3]))->assertOk()->assertDontSee('Panther Test');
-        $this->get(route('schedules.show',$schedule))->assertOk()->assertSee('Pilih Kursi');
+        $this->get(route('travel.search', ['model' => 'Toyota Avanza']))->assertOk()->assertDontSee('Panther Test');
+        $this->get(route('travel.search', ['passengers' => 3]))->assertOk()->assertDontSee('Panther Test');
+        $this->get(route('schedules.show', $schedule))->assertOk()->assertSee('Pilih Kursi');
+    }
+
+    public function test_report_total_covers_every_filtered_row_not_only_the_page(): void
+    {
+        [$schedule] = $this->journey();
+        $admin = User::factory()->create(['role' => 'super_admin']);
+        $customer = User::factory()->create();
+        foreach (range(1, 31) as $index) {
+            Booking::create([
+                'code' => 'TRV-REPORT-'.$index, 'user_id' => $customer->id, 'schedule_id' => $schedule->id,
+                'status' => 'dikonfirmasi', 'payment_status' => 'lunas', 'pickup_address' => 'Jalan Satu',
+                'dropoff_address' => 'Jalan Dua', 'phone' => '08123456789', 'passenger_count' => 1,
+                'fare_snapshot' => 100000, 'total' => 100000, 'expires_at' => now()->addHour(), 'paid_at' => now(),
+            ]);
+        }
+
+        $this->actingAs($admin)->get(route('admin.reports'))->assertOk()
+            ->assertSee('Rp3.100.000')->assertSee('31 transaksi')->assertSee('31 penumpang');
+        $this->get(route('admin.reports.csv'))->assertOk();
+    }
+
+    public function test_midtrans_webhook_for_unknown_order_is_acknowledged_without_side_effects(): void
+    {
+        config(['services.midtrans.server_key' => 'sandbox-secret']);
+        $payload = ['order_id' => 'ORDER-TIDAK-DIKENAL', 'status_code' => '200', 'gross_amount' => '100000.00', 'transaction_id' => 'TX-HANTU', 'transaction_status' => 'settlement'];
+        $payload['signature_key'] = hash('sha512', $payload['order_id'].$payload['status_code'].$payload['gross_amount'].'sandbox-secret');
+
+        $this->postJson(route('payments.webhook'), $payload)->assertOk();
+        $this->assertDatabaseCount('payments', 0);
+        $this->assertDatabaseCount('payment_events', 0);
+    }
+
+    public function test_settlement_on_second_channel_is_flagged_for_refund_instead_of_double_paying(): void
+    {
+        [$schedule, $seat] = $this->journey();
+        $customer = User::factory()->create();
+        $admin = User::factory()->create(['role' => 'super_admin']);
+        $booking = app(BookingService::class)->reserve($customer->id, $this->data($schedule, [$seat]));
+        app(PaymentService::class)->approve(app(PaymentService::class)->manual($booking));
+        $booking->update(['status' => 'selesai']);
+
+        $gateway = Payment::create(['booking_id' => $booking->id, 'method' => 'midtrans', 'status' => 'pending', 'amount' => $booking->total, 'gateway_order_id' => 'ORDER-KEDUA']);
+        config(['services.midtrans.server_key' => 'sandbox-secret']);
+        $payload = ['order_id' => 'ORDER-KEDUA', 'status_code' => '200', 'gross_amount' => (string) $booking->total.'.00', 'transaction_id' => 'TX-2', 'transaction_status' => 'settlement'];
+        $payload['signature_key'] = hash('sha512', $payload['order_id'].$payload['status_code'].$payload['gross_amount'].'sandbox-secret');
+
+        $this->postJson(route('payments.webhook'), $payload)->assertOk();
+        $this->assertSame('refund', $gateway->fresh()->status);
+        $this->assertSame('lunas', $booking->fresh()->payment_status);
+        $this->assertSame('selesai', $booking->fresh()->status);
+        $this->assertSame(1, Invoice::where('booking_id', $booking->id)->count());
+
+        $second = Payment::create(['booking_id' => $booking->id, 'method' => 'transfer', 'status' => 'pending', 'amount' => $booking->total, 'proof_path' => 'payment-proofs/lain.pdf']);
+        $this->actingAs($admin)->post(route('admin.payments.approve', $second))->assertSessionHasErrors('payment');
+        $this->assertSame('pending', $second->fresh()->status);
+    }
+
+    public function test_admin_can_change_own_password_from_profile_page(): void
+    {
+        $admin = User::factory()->create(['role' => 'super_admin', 'email' => 'ganti@example.test', 'password' => 'password-lama-123']);
+        $this->actingAs($admin)->get(route('profile.edit'))->assertOk()->assertSee('Ganti kata sandi');
+
+        $this->put(route('profile.password'), [
+            'current_password' => 'salah-sekali-123',
+            'password' => 'kata-sandi-baru-123',
+            'password_confirmation' => 'kata-sandi-baru-123',
+        ])->assertSessionHasErrors('current_password');
+        $this->assertTrue(Hash::check('password-lama-123', $admin->fresh()->password));
+
+        $this->put(route('profile.password'), [
+            'current_password' => 'password-lama-123',
+            'password' => 'kata-sandi-baru-123',
+            'password_confirmation' => 'kata-sandi-baru-123',
+        ])->assertRedirect()->assertSessionHasNoErrors();
+        $this->assertTrue(Hash::check('kata-sandi-baru-123', $admin->fresh()->password));
+        $this->get(route('admin.dashboard'))->assertOk();
+
+        $this->put(route('profile.password'), [
+            'current_password' => 'kata-sandi-baru-123',
+            'password' => 'pendek',
+            'password_confirmation' => 'pendek',
+        ])->assertSessionHasErrors('password');
+
+        $this->post('/logout');
+        $this->post('/login', ['email' => 'ganti@example.test', 'password' => 'password-lama-123'])->assertSessionHasErrors('email');
+        $this->post('/login', ['email' => 'ganti@example.test', 'password' => 'kata-sandi-baru-123'])->assertRedirect(route('admin.dashboard'));
+    }
+
+    public function test_super_admin_command_creates_and_resets_account(): void
+    {
+        $this->artisan('app:super-admin', ['email' => 'baru@nusa.local', '--password' => 'rahasia-panjang-123'])->assertExitCode(0);
+        $user = User::where('email', 'baru@nusa.local')->firstOrFail();
+        $this->assertSame('super_admin', $user->role);
+        $this->assertTrue(Hash::check('rahasia-panjang-123', $user->password));
+
+        $this->artisan('app:super-admin', ['email' => 'baru@nusa.local', '--password' => 'rahasia-baru-456'])->assertExitCode(0);
+        $this->assertSame(1, User::where('email', 'baru@nusa.local')->count());
+        $this->assertTrue(Hash::check('rahasia-baru-456', $user->fresh()->password));
+
+        $this->artisan('app:super-admin', ['email' => 'bukan-email', '--password' => 'pendek'])->assertExitCode(1);
+        $this->assertSame(1, User::count());
+    }
+
+    public function test_admin_status_form_only_allows_valid_transitions_and_never_returns_422(): void
+    {
+        [$schedule, $seat1] = $this->journey();
+        $customer = User::factory()->create();
+        $admin = User::factory()->create(['role' => 'super_admin']);
+        $booking = app(BookingService::class)->reserve($customer->id, $this->data($schedule, [$seat1]));
+
+        // Halaman detail menampilkan breadcrumb panel admin, bukan "Pesanan Saya".
+        $this->actingAs($admin)->get(route('bookings.show', $booking))->assertOk()
+            ->assertSee(route('admin.bookings'), false)
+            ->assertSee('Pesanan belum lunas')
+            ->assertDontSee('Konfirmasi pesanan');
+        $this->actingAs($admin)->get(route('customer.dashboard'))->assertOk();
+
+        // Pesanan belum lunas tidak boleh dikonfirmasi: galat validasi yang terbaca, bukan halaman 422.
+        $this->actingAs($admin)->from(route('bookings.show', $booking))
+            ->post(route('admin.bookings.status', $booking), ['status' => 'dikonfirmasi'])
+            ->assertRedirect(route('bookings.show', $booking))
+            ->assertSessionHasErrors('status');
+        $this->assertSame('menunggu_pembayaran', $booking->fresh()->status);
+
+        // Setelah lunas, alurnya berjalan: konfirmasi lalu selesai.
+        $payment = app(PaymentService::class)->manual($booking);
+        $payment->update(['proof_path' => 'payment-proofs/bukti.pdf']);
+        app(PaymentService::class)->approve($payment);
+        $this->assertSame('dikonfirmasi', $booking->fresh()->status);
+
+        $this->actingAs($admin)->get(route('bookings.show', $booking))->assertOk()
+            ->assertSee('Tandai selesai')
+            ->assertDontSee('Konfirmasi pesanan');
+
+        $this->actingAs($admin)->post(route('admin.bookings.status', $booking), ['status' => 'selesai'])->assertSessionHasNoErrors();
+        $this->assertSame('selesai', $booking->fresh()->status);
+
+        // Tidak bisa dikembalikan ke dikonfirmasi dan tidak bisa dibatalkan (pesanan lunas).
+        $this->actingAs($admin)->post(route('admin.bookings.status', $booking), ['status' => 'dikonfirmasi'])->assertSessionHasErrors('status');
+        $this->actingAs($admin)->post(route('admin.bookings.status', $booking), ['status' => 'dibatalkan'])->assertSessionHasErrors('booking');
+        $this->assertSame('selesai', $booking->fresh()->status);
+    }
+
+    public function test_admin_can_cancel_unpaid_booking_from_admin_booking_page(): void
+    {
+        [$schedule, $seat1] = $this->journey();
+        $admin = User::factory()->create(['role' => 'super_admin']);
+        $booking = app(BookingService::class)->reserve(User::factory()->create()->id, $this->data($schedule, [$seat1]));
+
+        $this->actingAs($admin)->get(route('bookings.show', $booking))->assertOk()
+            ->assertSee('Batalkan pesanan')
+            ->assertDontSee('Tandai selesai');
+
+        $this->actingAs($admin)->post(route('admin.bookings.status', $booking), ['status' => 'dibatalkan'])
+            ->assertRedirect()->assertSessionHasNoErrors();
+        $this->assertSame('dibatalkan', $booking->fresh()->status);
+        $this->assertDatabaseMissing('booking_seats', ['booking_id' => $booking->id]);
+    }
+
+    public function test_checkin_requires_paid_booking_and_own_passengers(): void
+    {
+        [$schedule, $seat1, $seat2] = $this->journey();
+        $admin = User::factory()->create(['role' => 'super_admin']);
+        $booking = app(BookingService::class)->reserve(User::factory()->create()->id, $this->data($schedule, [$seat1]));
+
+        $this->actingAs($admin)->post(route('admin.checkin', $booking), ['passenger_ids' => [$booking->passengers()->first()->id]])
+            ->assertSessionHasErrors('passenger_ids');
+
+        $payment = app(PaymentService::class)->manual($booking);
+        $payment->update(['proof_path' => 'payment-proofs/bukti.pdf']);
+        app(PaymentService::class)->approve($payment);
+
+        // Tanpa memilih penumpang, admin mendapat pesan yang jelas.
+        $this->actingAs($admin)->post(route('admin.checkin', $booking))->assertSessionHasErrors('passenger_ids');
+        $this->assertNull($booking->passengers()->first()->checked_in_at);
+
+        // Penumpang milik pesanan lain tidak dapat di-check-in lewat pesanan ini.
+        $lain = app(BookingService::class)->reserve(User::factory()->create()->id, $this->data($schedule, [$seat2]));
+        $this->actingAs($admin)->post(route('admin.checkin', $booking), ['passenger_ids' => [$lain->passengers()->first()->id]])
+            ->assertSessionHasErrors('passenger_ids.0');
+
+        $this->actingAs($admin)->post(route('admin.checkin', $booking), ['passenger_ids' => [$booking->passengers()->first()->id]])->assertSessionHasNoErrors();
+        $this->assertNotNull($booking->passengers()->first()->checked_in_at);
+    }
+
+    public function test_payment_approval_without_proof_redirects_with_message_instead_of_422(): void
+    {
+        [$schedule, $seat1] = $this->journey();
+        $admin = User::factory()->create(['role' => 'super_admin']);
+        $booking = app(BookingService::class)->reserve(User::factory()->create()->id, $this->data($schedule, [$seat1]));
+        $payment = app(PaymentService::class)->manual($booking);
+
+        $this->actingAs($admin)->from(route('admin.payments'))
+            ->post(route('admin.payments.approve', $payment))
+            ->assertRedirect(route('admin.payments'))
+            ->assertSessionHasErrors('payment');
+        $this->assertSame('pending', $payment->fresh()->status);
+
+        // Halaman admin menampilkan peringatan dan tombol setujui nonaktif.
+        $this->actingAs($admin)->get(route('admin.payments'))->assertOk()
+            ->assertSee('Bukti transfer belum diunggah pelanggan.')
+            ->assertSee('disabled', false);
+    }
+
+    public function test_admin_lists_search_and_expire_stale_bookings(): void
+    {
+        [$schedule, $seat1] = $this->journey();
+        $admin = User::factory()->create(['role' => 'super_admin']);
+        $customer = User::factory()->create(['name' => 'Rani Pencari', 'email' => 'rani@example.test']);
+        $booking = app(BookingService::class)->reserve($customer->id, $this->data($schedule, [$seat1]));
+        $booking->update(['expires_at' => now()->subMinutes(5)]);
+
+        // Membuka daftar admin memaksa pesanan yang lewat batas bayar menjadi kedaluwarsa.
+        $this->actingAs($admin)->get(route('admin.bookings'))->assertOk()->assertSee($booking->code);
+        $this->assertSame('kedaluwarsa', $booking->fresh()->status);
+
+        $this->actingAs($admin)->get(route('admin.customers', ['q' => 'rani']))->assertOk()
+            ->assertSee('Rani Pencari')
+            ->assertSee('rani@example.test')
+            ->assertSee('1 pesanan');
+
+        $this->actingAs($admin)->get(route('admin.invoices', ['number' => 'tidak-ada']))->assertOk()->assertSee('Belum ada faktur.');
+        $this->actingAs($admin)->get(route('admin.dashboard'))->assertOk();
+    }
+
+    public function test_report_date_filter_is_guarded_and_csv_includes_payment_method(): void
+    {
+        [$schedule, $seat1] = $this->journey();
+        $admin = User::factory()->create(['role' => 'super_admin']);
+        $booking = app(BookingService::class)->reserve(User::factory()->create()->id, $this->data($schedule, [$seat1]));
+        $payment = app(PaymentService::class)->manual($booking);
+        $payment->update(['proof_path' => 'payment-proofs/bukti.pdf']);
+        app(PaymentService::class)->approve($payment);
+
+        // Tanggal terbalik dijawab dengan redirect + pesan, bukan redirect berulang ke URL filter yang sama.
+        $this->actingAs($admin)->get(route('admin.reports', ['from' => '2026-12-31', 'to' => '2026-01-01']))
+            ->assertRedirect(route('admin.reports', ['from' => '2026-12-31']))
+            ->assertSessionHasErrors('to');
+
+        $this->actingAs($admin)->get(route('admin.reports', ['to' => '2026-12-31']))->assertOk();
+
+        $csv = $this->actingAs($admin)->get(route('admin.reports.csv'))->streamedContent();
+        $this->assertStringContainsString('Metode', $csv);
+        $this->assertStringContainsString('transfer', $csv);
+        $this->assertStringContainsString($booking->code, $csv);
+    }
+
+    public function test_validation_and_auth_messages_are_translated_to_indonesian(): void
+    {
+        $this->post('/login', ['email' => '', 'password' => ''])->assertSessionHasErrors([
+            'email' => 'email wajib diisi.',
+            'password' => 'kata sandi wajib diisi.',
+        ]);
+
+        $this->post('/login', ['email' => 'tidak-ada@example.test', 'password' => 'salah-sekali'])->assertSessionHasErrors([
+            'email' => 'Email atau kata sandi salah.',
+        ]);
     }
 }

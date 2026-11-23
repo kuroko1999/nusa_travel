@@ -13,24 +13,32 @@ use App\Services\BookingService;
 use App\Services\PaymentService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class ManagementController extends Controller
 {
-    public function bookings(Request $request)
+    public function bookings(Request $request, BookingService $service)
     {
-        $bookings = Booking::with('user', 'passengers', 'schedule.route')->when($request->code, fn ($q) => $q->where('code', 'like', '%'.$request->code.'%'))->when($request->status, fn ($q) => $q->where('status', $request->status))->latest()->paginate(20);
+        // Rapikan pesanan yang sudah lewat batas bayar agar daftar admin tidak menampilkan status usang bila scheduler tidak berjalan.
+        $service->expireDue();
+        $bookings = Booking::with('user', 'passengers', 'schedule.route')->when($request->code, fn ($q) => $q->where('code', 'like', '%'.$request->code.'%'))->when($request->status, fn ($q) => $q->where('status', $request->status))->latest()->paginate(20)->withQueryString();
 
         return view('admin.bookings', compact('bookings'));
     }
 
-    public function payments()
+    public function payments(BookingService $service)
     {
-        return view('admin.payments', ['payments' => Payment::with('booking.user', 'booking.passengers')->latest()->paginate(20)]);
+        $service->expireDue();
+
+        return view('admin.payments', ['payments' => Payment::with('booking.user', 'booking.passengers', 'booking.schedule.route')->latest()->paginate(20)]);
     }
 
     public function approve(Payment $payment, PaymentService $service)
     {
-        abort_unless($payment->method === 'transfer' && $payment->proof_path, 422);
+        if ($payment->method !== 'transfer' || ! $payment->proof_path) {
+            throw ValidationException::withMessages(['payment' => 'Pembayaran ini tidak dapat disetujui: metode bukan transfer bank atau bukti transfer belum diunggah.']);
+        }
         $service->approve($payment);
         AuditLog::create(['user_id' => auth()->id(), 'action' => 'payment_approved', 'subject_type' => Payment::class, 'subject_id' => $payment->id]);
 
@@ -40,7 +48,9 @@ class ManagementController extends Controller
     public function reject(Request $request, Payment $payment)
     {
         $data = $request->validate(['reason' => 'required|string|max:500']);
-        abort_unless($payment->method === 'transfer' && $payment->status === 'pending', 422);
+        if ($payment->method !== 'transfer' || $payment->status !== 'pending') {
+            throw ValidationException::withMessages(['reason' => 'Pembayaran ini sudah diproses atau bukan transfer bank.']);
+        }
         $payment->update(['status' => 'gagal', 'rejection_reason' => $data['reason']]);
         AuditLog::create(['user_id' => auth()->id(), 'action' => 'payment_rejected', 'subject_type' => Payment::class, 'subject_id' => $payment->id, 'details' => $data]);
 
@@ -56,14 +66,28 @@ class ManagementController extends Controller
 
     public function invoices(Request $request)
     {
-        $invoices = Invoice::with('booking.user', 'booking.passengers')->when($request->number, fn ($q) => $q->where('number', 'like', '%'.$request->number.'%'))->latest()->paginate(20);
+        $invoices = Invoice::with('booking.user', 'booking.passengers')->when($request->filled('number'), function ($query) use ($request) {
+            $term = '%'.trim((string) $request->number).'%';
+            $query->where(fn ($w) => $w->where('number', 'like', $term)
+                ->orWhereHas('booking', fn ($b) => $b->where('code', 'like', $term)->orWhere('phone', 'like', $term)
+                    ->orWhereHas('user', fn ($u) => $u->where('name', 'like', $term)->orWhere('email', 'like', $term))));
+        })->latest()->paginate(20)->withQueryString();
 
         return view('admin.invoices', compact('invoices'));
     }
 
-    public function customers()
+    public function customers(Request $request)
     {
-        return view('admin.customers', ['customers' => User::where('role', 'pelanggan')->latest()->paginate(20)]);
+        $customers = User::where('role', 'pelanggan')
+            ->when($request->filled('q'), function ($query) use ($request) {
+                $term = '%'.trim((string) $request->q).'%';
+                $query->where(fn ($w) => $w->where('name', 'like', $term)->orWhere('email', 'like', $term)->orWhere('phone', 'like', $term));
+            })
+            ->withCount('bookings')
+            ->withSum(['bookings as total_spent' => fn ($q) => $q->where('payment_status', 'lunas')], 'total')
+            ->latest()->paginate(20)->withQueryString();
+
+        return view('admin.customers', compact('customers'));
     }
 
     public function settings()
@@ -80,20 +104,28 @@ class ManagementController extends Controller
             } else {
                 unset($data[$file]);
             }
-        }foreach ($data as $key => $value) {
+        }
+        foreach ($data as $key => $value) {
             Setting::updateOrCreate(['key' => $key], ['value' => $value]);
         }
 
-return back()->with('status', 'Pengaturan disimpan.');
+        return back()->with('status', 'Pengaturan disimpan.');
     }
 
     public function status(Request $request, Booking $booking)
     {
         $status = $request->validate(['status' => 'required|in:dikonfirmasi,selesai,dibatalkan'])['status'];
+
         if ($status === 'dibatalkan') {
             app(BookingService::class)->cancel($booking);
         } else {
-            abort_unless($booking->payment_status === 'lunas', 422);
+            if ($booking->payment_status !== 'lunas') {
+                throw ValidationException::withMessages(['status' => 'Pesanan harus lunas sebelum status "'.str_replace('_', ' ', $status).'" dapat ditetapkan. Verifikasi pembayaran terlebih dahulu.']);
+            }
+            $statusDiizinkan = $status === 'dikonfirmasi' ? ['menunggu_pembayaran'] : ['menunggu_pembayaran', 'dikonfirmasi'];
+            if (! in_array($booking->status, $statusDiizinkan, true)) {
+                throw ValidationException::withMessages(['status' => 'Status "'.str_replace('_', ' ', $booking->status).'" tidak dapat diubah menjadi "'.str_replace('_', ' ', $status).'".']);
+            }
             $booking->update(['status' => $status]);
         }
         AuditLog::create(['user_id' => auth()->id(), 'action' => 'booking_status', 'subject_type' => Booking::class, 'subject_id' => $booking->id, 'details' => ['status' => $status]]);
@@ -103,10 +135,21 @@ return back()->with('status', 'Pengaturan disimpan.');
 
     public function checkin(Request $request, Booking $booking)
     {
-        abort_unless($booking->payment_status === 'lunas', 422);
-        $ids = $request->validate(['passenger_ids' => 'required|array', 'passenger_ids.*' => 'integer|exists:booking_passengers,id'])['passenger_ids'];
+        if ($booking->payment_status !== 'lunas') {
+            throw ValidationException::withMessages(['passenger_ids' => 'Check-in hanya tersedia untuk pesanan yang sudah lunas.']);
+        }
+        if (in_array($booking->status, ['dibatalkan', 'kedaluwarsa'], true)) {
+            throw ValidationException::withMessages(['passenger_ids' => 'Pesanan sudah dibatalkan atau kedaluwarsa.']);
+        }
+        $ids = $request->validate([
+            'passenger_ids' => ['required', 'array', 'min:1'],
+            'passenger_ids.*' => [Rule::exists('booking_passengers', 'id')->where('booking_id', $booking->id)],
+        ], [
+            'passenger_ids.required' => 'Pilih minimal satu penumpang untuk check-in.',
+            'passenger_ids.min' => 'Pilih minimal satu penumpang untuk check-in.',
+        ])['passenger_ids'];
         $booking->passengers()->whereIn('id', $ids)->update(['checked_in_at' => now()]);
 
-        return back()->with('status','Check-in berhasil.');
+        return back()->with('status', 'Check-in berhasil.');
     }
 }

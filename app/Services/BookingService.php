@@ -28,11 +28,11 @@ class BookingService
         }, 3);
     }
 
-    public function reserve(?int $userId, array $data, ?string $guestKeyHash = null): Booking
+    public function reserve(?int $userId, array $data): Booking
     {
         $this->expireDue();
         try {
-            return DB::transaction(function () use ($userId, $data, $guestKeyHash) {
+            return DB::transaction(function () use ($userId, $data) {
                 $schedule = Schedule::with('vehicle')->lockForUpdate()->findOrFail($data['schedule_id']);
                 if ($schedule->status !== 'terjadwal' || $schedule->departs_at->isPast() || $schedule->vehicle->status !== 'aktif') {
                     throw ValidationException::withMessages(['schedule_id' => 'Jadwal tidak tersedia.']);
@@ -54,7 +54,7 @@ class BookingService
                 $count = count($seatIds);
                 $booking = Booking::create([
                     'code' => 'TRV-'.now()->format('ymd').'-'.strtoupper(Str::random(7)), 'user_id' => $userId,
-                    'guest_key_hash' => $guestKeyHash, 'schedule_id' => $schedule->id, 'pickup_address' => $data['pickup_address'],
+                    'schedule_id' => $schedule->id, 'pickup_address' => $data['pickup_address'],
                     'dropoff_address' => $data['dropoff_address'], 'phone' => $data['phone'],
                     'notes' => $data['notes'] ?? null, 'passenger_count' => $count,
                     'fare_snapshot' => $schedule->fare, 'pickup_fee' => $pickupFee, 'dropoff_fee' => $dropoffFee,

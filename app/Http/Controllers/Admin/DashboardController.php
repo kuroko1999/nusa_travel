@@ -22,8 +22,15 @@ class DashboardController extends Controller
             'completed' => Booking::where('status', 'selesai')->count(),
         ];
         $bookings = Booking::with('user', 'passengers', 'schedule.route')->latest()->limit(8)->get();
-        $chart = Booking::where('payment_status', 'lunas')->where('paid_at', '>=', now()->subMonths(11)->startOfMonth())->get(['paid_at', 'total'])->groupBy(fn ($b) => $b->paid_at->format('Y-m'))->map(fn ($rows, $month) => (object) ['month' => $month, 'total' => $rows->sum('total')])->values();
+        // Total per bulan diambil sekali, lalu 12 bulan terakhir diisi lengkap (bulan tanpa transaksi bernilai 0) agar grafik tidak menyesatkan.
+        $totals = Booking::where('payment_status', 'lunas')->whereNotNull('paid_at')->where('paid_at', '>=', now()->subMonths(11)->startOfMonth())
+            ->get(['paid_at', 'total'])->groupBy(fn ($b) => $b->paid_at->format('Y-m'))->map->sum('total');
+        $chart = collect(range(11, 0))->map(function ($back) use ($totals) {
+            $month = now()->subMonths($back)->startOfMonth();
 
-        return view('admin.dashboard',compact('stats','bookings','chart'));
+            return (object) ['label' => $month->translatedFormat('M Y'), 'total' => (int) ($totals[$month->format('Y-m')] ?? 0)];
+        });
+
+        return view('admin.dashboard', compact('stats', 'bookings', 'chart'));
     }
 }

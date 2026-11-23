@@ -1,9 +1,11 @@
 <?php
 
+use App\Http\Middleware\EnsureSuperAdmin;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
+use Illuminate\Session\Middleware\AuthenticateSession;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -12,11 +14,12 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        $middleware->alias(['super_admin'=>\App\Http\Middleware\EnsureSuperAdmin::class]);
+        // Wajib agar sesi lain gugur setelah kata sandi diubah (lihat ProfileController::password).
+        $middleware->web(append: [AuthenticateSession::class]);
+        $middleware->alias(['super_admin' => EnsureSuperAdmin::class]);
         $middleware->validateCsrfTokens(except: ['payments/midtrans/webhook']);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        $exceptions->dontFlash(['guest_key']);
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
         );

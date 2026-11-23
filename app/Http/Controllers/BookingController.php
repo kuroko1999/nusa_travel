@@ -6,7 +6,6 @@ use App\Http\Requests\ReserveBookingRequest;
 use App\Models\Booking;
 use App\Services\BookingService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Gate;
 
 class BookingController extends Controller
@@ -14,16 +13,10 @@ class BookingController extends Controller
     public function store(ReserveBookingRequest $request, BookingService $service)
     {
         $userId = $request->user()?->id;
-        $guestKey = $userId === null ? bin2hex(random_bytes(32)) : null;
-        $booking = $service->reserve(
-            $userId,
-            $request->validated(),
-            $guestKey === null ? null : hash('sha256', $guestKey),
-        );
+        $booking = $service->reserve($userId, $request->validated());
 
-        if ($guestKey !== null) {
+        if ($userId === null) {
             $booking->grantGuestAccess($request);
-            $request->session()->flash('guest_key_'.$booking->id, Crypt::encryptString($guestKey));
         }
 
         return redirect()->route('bookings.show', $booking);
@@ -38,22 +31,24 @@ class BookingController extends Controller
     {
         $data = $request->validate([
             'code' => ['required', 'string', 'max:40'],
-            'guest_key' => ['nullable', 'string', 'regex:/^[a-f0-9]{64}$/i'],
+            'phone' => ['required', 'string', 'max:30'],
         ]);
-        $booking = Booking::where('code', strtoupper($data['code']))->first();
+        $booking = Booking::where('code', strtoupper(trim($data['code'])))->first();
         if ($booking !== null && Gate::allows('view', $booking)) {
             return redirect()->route('bookings.show', $booking);
         }
 
-        if ($booking?->user_id === null && $booking?->guest_key_hash !== null
-            && hash_equals($booking->guest_key_hash, hash('sha256', strtolower($data['guest_key'] ?? '')))) {
+        $nomor = Booking::normalizePhone($data['phone']);
+        if ($nomor !== '' && $booking !== null && $booking->user_id === null
+            && hash_equals(Booking::normalizePhone($booking->phone), $nomor)) {
             $booking->grantGuestAccess($request);
 
             return redirect()->route('bookings.show', $booking);
         }
 
         return redirect()->route('booking.check')
-            ->withErrors(['code' => 'Kode booking atau kunci akses tidak cocok.']);
+            ->withErrors(['code' => 'Kode booking atau nomor WhatsApp tidak cocok.'])
+            ->withInput($request->only('code'));
     }
 
     public function index(Request $request)
@@ -71,15 +66,12 @@ class BookingController extends Controller
         return view('customer.documents', compact('bookings', 'type'));
     }
 
-    public function show(Request $request, Booking $booking)
+    public function show(Booking $booking)
     {
         Gate::authorize('view', $booking);
         $booking->load(['schedule.route', 'schedule.vehicle', 'passengers.seat', 'payments', 'invoice']);
 
-        $encryptedKey = $request->session()->pull('guest_key_'.$booking->id);
-        $guestKey = $encryptedKey === null ? null : Crypt::decryptString($encryptedKey);
-
-        return view('customer.booking', compact('booking', 'guestKey'));
+        return view('customer.booking', compact('booking'));
     }
 
     public function cancel(Booking $booking, BookingService $service)
@@ -87,6 +79,6 @@ class BookingController extends Controller
         Gate::authorize('cancel', $booking);
         $service->cancel($booking);
 
-        return back()->with('status','Pesanan dibatalkan.');
+        return back()->with('status', 'Pesanan dibatalkan.');
     }
 }
