@@ -21,7 +21,7 @@ class DashboardController extends Controller
             'pending' => Booking::where('status', 'menunggu_pembayaran')->count(),
             'completed' => Booking::where('status', 'selesai')->count(),
         ];
-        $bookings = Booking::with('user', 'schedule.route')->latest()->limit(8)->get();
+        $bookings = Booking::with('user', 'passengers', 'schedule.route')->latest()->limit(8)->get();
         $chart = Booking::where('payment_status', 'lunas')->where('paid_at', '>=', now()->subMonths(11)->startOfMonth())->get(['paid_at', 'total'])->groupBy(fn ($b) => $b->paid_at->format('Y-m'))->map(fn ($rows, $month) => (object) ['month' => $month, 'total' => $rows->sum('total')])->values();
 
         return view('admin.dashboard',compact('stats','bookings','chart'));

@@ -7,8 +7,10 @@ use App\Models\User;
 
 class InvoicePolicy
 {
-    public function view(User $user, Invoice $invoice): bool
+    public function __construct(private BookingPolicy $bookings) {}
+
+    public function view(?User $user, Invoice $invoice): bool
     {
-        return $user->role === 'super_admin' || $invoice->booking->user_id === $user->id;
+        return $this->bookings->view($user, $invoice->booking);
     }
 }

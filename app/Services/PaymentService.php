@@ -41,7 +41,11 @@ class PaymentService
         $url = config('services.midtrans.production') ? 'https://app.midtrans.com/snap/v1/transactions' : 'https://app.sandbox.midtrans.com/snap/v1/transactions';
         $response = Http::withBasicAuth($key, '')->acceptJson()->post($url, [
             'transaction_details' => ['order_id' => $payment->gateway_order_id, 'gross_amount' => $booking->total],
-            'customer_details' => ['first_name' => $booking->user->name, 'email' => $booking->user->email, 'phone' => $booking->phone],
+            'customer_details' => array_filter([
+                'first_name' => $booking->customerName(),
+                'email' => $booking->user?->email,
+                'phone' => $booking->phone,
+            ], fn ($value) => $value !== null),
             'expiry' => ['unit' => 'minute', 'duration' => (int) max(1, now()->diffInMinutes($booking->expires_at, false))],
         ]);
         if (! $response->successful() || ! $response->json('redirect_url')) {
@@ -76,7 +80,7 @@ class PaymentService
                 'company' => Setting::find('company_name')?->value ?? 'Nusa Travel',
                 'address' => Setting::find('company_address')?->value ?? '',
                 'whatsapp' => Setting::find('whatsapp')?->value ?? '',
-                'customer' => $booking->user->name, 'customer_phone' => $booking->phone,
+                'customer' => $booking->customerName(), 'customer_phone' => $booking->phone,
                 'origin' => $booking->schedule->route->origin, 'destination' => $booking->schedule->route->destination,
                 'departs_at' => $booking->schedule->departs_at->toIso8601String(),
                 'vehicle' => $booking->schedule->vehicle->model, 'plate' => $booking->schedule->vehicle->plate,

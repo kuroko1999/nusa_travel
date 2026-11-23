@@ -3,10 +3,32 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Http\Request;
 
 class Booking extends Model
 {
-    protected $fillable = ['code', 'user_id', 'schedule_id', 'status', 'payment_status', 'pickup_address', 'dropoff_address', 'phone', 'notes', 'passenger_count', 'fare_snapshot', 'pickup_fee', 'dropoff_fee', 'discount', 'total', 'expires_at', 'paid_at'];
+    protected $fillable = ['code', 'user_id', 'guest_key_hash', 'schedule_id', 'status', 'payment_status', 'pickup_address', 'dropoff_address', 'phone', 'notes', 'passenger_count', 'fare_snapshot', 'pickup_fee', 'dropoff_fee', 'discount', 'total', 'expires_at', 'paid_at'];
+
+    protected $hidden = ['guest_key_hash'];
+
+    public function grantGuestAccess(Request $request): void
+    {
+        $request->session()->regenerate(true);
+        $request->session()->put('guest_bookings.'.$this->id, now()->addHours(24)->timestamp);
+    }
+
+    public function hasGuestAccess(Request $request): bool
+    {
+        return $this->user_id === null
+            && $this->guest_key_hash !== null
+            && $request->hasSession()
+            && $request->session()->get('guest_bookings.'.$this->id, 0) > now()->timestamp;
+    }
+
+    public function customerName(): string
+    {
+        return $this->user?->name ?? $this->passengers->sortBy('id')->first()?->name ?? 'Tamu';
+    }
 
     public function user()
     {

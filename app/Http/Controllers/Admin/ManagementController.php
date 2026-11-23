@@ -18,14 +18,14 @@ class ManagementController extends Controller
 {
     public function bookings(Request $request)
     {
-        $bookings = Booking::with('user', 'schedule.route')->when($request->code, fn ($q) => $q->where('code', 'like', '%'.$request->code.'%'))->when($request->status, fn ($q) => $q->where('status', $request->status))->latest()->paginate(20);
+        $bookings = Booking::with('user', 'passengers', 'schedule.route')->when($request->code, fn ($q) => $q->where('code', 'like', '%'.$request->code.'%'))->when($request->status, fn ($q) => $q->where('status', $request->status))->latest()->paginate(20);
 
         return view('admin.bookings', compact('bookings'));
     }
 
     public function payments()
     {
-        return view('admin.payments', ['payments' => Payment::with('booking.user')->latest()->paginate(20)]);
+        return view('admin.payments', ['payments' => Payment::with('booking.user', 'booking.passengers')->latest()->paginate(20)]);
     }
 
     public function approve(Payment $payment, PaymentService $service)
@@ -56,7 +56,7 @@ class ManagementController extends Controller
 
     public function invoices(Request $request)
     {
-        $invoices = Invoice::with('booking.user')->when($request->number, fn ($q) => $q->where('number', 'like', '%'.$request->number.'%'))->latest()->paginate(20);
+        $invoices = Invoice::with('booking.user', 'booking.passengers')->when($request->number, fn ($q) => $q->where('number', 'like', '%'.$request->number.'%'))->latest()->paginate(20);
 
         return view('admin.invoices', compact('invoices'));
     }

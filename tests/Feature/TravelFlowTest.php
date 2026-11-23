@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Booking;
 use App\Models\Invoice;
 use App\Models\Payment;
 use App\Models\Review;
@@ -14,6 +15,8 @@ use App\Services\BookingService;
 use App\Services\PaymentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
@@ -78,6 +81,69 @@ class TravelFlowTest extends TestCase
         $this->get(route('invoices.pdf', $invoice))->assertOk();
         $other = User::factory()->create();
         $this->actingAs($other)->get(route('invoices.show', $invoice))->assertForbidden();
+    }
+
+    public function test_guest_can_book_and_recover_private_invoice(): void
+    {
+        [$schedule, $seat] = $this->journey();
+        $this->get(route('schedules.show', $schedule))->assertOk();
+        $response = $this->post(route('bookings.store'), $this->data($schedule, [$seat]));
+        $booking = Booking::sole();
+        $key = Crypt::decryptString(session('guest_key_'.$booking->id));
+
+        $response->assertRedirect(route('bookings.show', $booking));
+        $this->assertGuest();
+        $this->assertNull($booking->user_id);
+        $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/', $key);
+        $this->assertSame(hash('sha256', $key), $booking->guest_key_hash);
+        $this->assertArrayNotHasKey('guest_key_hash', $booking->toArray());
+        $this->get(route('bookings.show', $booking))->assertOk()->assertSee($key);
+        $this->get(route('bookings.show', $booking))->assertOk()->assertDontSee($key);
+        $this->get(route('tickets.pdf', $booking))->assertNotFound();
+
+        $this->post(route('payments.choose', $booking), ['method' => 'transfer'])
+            ->assertRedirect(route('bookings.show', $booking));
+        $payment = $booking->payments()->sole();
+        Storage::fake('local');
+        $this->from(route('bookings.show', $booking))->post(route('payments.proof', $payment), [
+            'proof' => UploadedFile::fake()->create('bukti.pdf', 5, 'application/pdf'),
+        ])->assertRedirect(route('bookings.show', $booking))->assertSessionHasNoErrors();
+        Storage::disk('local')->assertExists($payment->fresh()->proof_path);
+        $invoice = app(PaymentService::class)->approve($payment);
+        $this->assertSame('Penumpang 1', $invoice->snapshot['customer']);
+        $this->get(route('invoices.show', $invoice))->assertOk()->assertSee('Penumpang 1');
+        $pdf = $this->get(route('invoices.pdf', $invoice))->assertOk()->assertDownload('faktur-'.$invoice->number.'.pdf');
+        $this->assertStringContainsString('no-store', $pdf->headers->get('Cache-Control'));
+
+        $this->app['session']->forget('guest_bookings');
+        $this->get(route('bookings.show', $booking))->assertForbidden();
+        $this->get(route('invoices.show', $invoice))->assertForbidden();
+        $this->get(route('invoices.pdf', $invoice))->assertForbidden();
+        $this->get(route('tickets.pdf', $booking))->assertForbidden();
+        $this->post(route('payments.proof', $payment))->assertForbidden();
+        $this->post(route('bookings.cancel', $booking))->assertForbidden();
+        $this->get(route('verify.invoice', $invoice->number))->assertOk()
+            ->assertDontSee('Penumpang 1')->assertDontSee('08123456789');
+
+        $this->from(route('booking.check'))->post(route('booking.recover'), [
+            'code' => $booking->code, 'guest_key' => 'invalid',
+        ])->assertSessionHasErrors('guest_key')->assertSessionMissing('_old_input.guest_key');
+        $this->post(route('booking.recover'), [
+            'code' => $booking->code, 'guest_key' => str_repeat('0', 64),
+        ])->assertRedirect(route('booking.check'))->assertSessionHasErrors('code');
+        $this->get(route('invoices.pdf', $invoice))->assertForbidden();
+
+        $this->post(route('booking.recover'), ['code' => $booking->code, 'guest_key' => $key])
+            ->assertRedirect(route('bookings.show', $booking));
+        $this->get(route('invoices.pdf', $invoice))->assertOk();
+        $this->travel(25)->hours();
+        $this->get(route('invoices.pdf', $invoice))->assertForbidden();
+        $this->travelBack();
+
+        $this->actingAs(User::factory()->create(['role' => 'super_admin']));
+        foreach (['dashboard', 'bookings', 'payments', 'invoices', 'reports'] as $page) {
+            $this->get(route('admin.'.$page))->assertOk()->assertSee('Penumpang 1');
+        }
     }
 
     public function test_unverified_midtrans_notification_is_rejected(): void

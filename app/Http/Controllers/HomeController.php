@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Booking;
 use App\Models\Review;
 use App\Models\Schedule;
 use App\Models\Setting;
@@ -72,13 +71,5 @@ class HomeController extends Controller
         $body = Setting::find($type)?->value;
 
         return view('information', compact('title', 'body'));
-    }
-
-    public function check(Request $request)
-    {
-        $code = $request->validate(['code' => 'required|string|max:40'])['code'];
-        $booking = Booking::with('schedule.route')->where('code',$code)->first();
-
-        return view('check',compact('booking'));
     }
 }

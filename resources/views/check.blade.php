@@ -1,1 +1,19 @@
-@extends('layouts.app') @section('title','Cek Booking') @section('content')<div class="page max-w-2xl"><span class="eyebrow">STATUS PESANAN</span><h1 class="heading mt-2">Cek booking</h1><form method="get" class="mt-6 flex gap-3"><input class="input" name="code" value="{{ request('code') }}" required><button class="btn-primary">Cari</button></form>@if($booking)<div class="mt-8 rounded-2xl bg-white p-7"><p class="text-sm text-slate-500">{{ $booking->code }}</p><h2 class="mt-2 text-xl font-bold">{{ $booking->schedule->route->origin }} → {{ $booking->schedule->route->destination }}</h2><p class="mt-3">Status pesanan: <strong>{{ str_replace('_',' ',ucfirst($booking->status)) }}</strong></p><p>Status pembayaran: <strong>{{ ucfirst($booking->payment_status) }}</strong></p>@auth @if(auth()->id()===$booking->user_id)<a class="btn-primary mt-5 inline-block" href="{{ route('bookings.show',$booking) }}">Lihat detail</a>@endif @endauth</div>@else<div class="mt-8 rounded-2xl bg-white p-7 text-slate-500">Kode booking tidak ditemukan.</div>@endif</div>@endsection
+@extends('layouts.app')
+@section('title', 'Cek Booking')
+@section('content')
+<div class="page max-w-2xl">
+    <h1 class="heading">Cek booking</h1>
+    <form method="post" action="{{ route('booking.recover') }}" class="mt-6 grid gap-4">
+        @csrf
+        <label class="field">
+            Kode booking
+            <input name="code" value="{{ old('code', request('code')) }}" maxlength="40" required>
+        </label>
+        <label class="field">
+            Kunci akses untuk pesanan tamu
+            <input type="password" name="guest_key" maxlength="64" autocomplete="off" spellcheck="false">
+        </label>
+        <button class="btn-primary">Buka pesanan</button>
+    </form>
+</div>
+@endsection

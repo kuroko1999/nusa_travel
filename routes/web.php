@@ -17,7 +17,8 @@ Route::get('/', [HomeController::class, 'index'])->name('home');
 Route::get('/travel', [HomeController::class, 'search'])->name('travel.search');
 Route::get('/jadwal/{schedule}', [HomeController::class, 'show'])->name('schedules.show');
 Route::get('/informasi/{type}', [HomeController::class, 'information'])->name('information');
-Route::get('/cek-booking', [HomeController::class, 'check'])->name('booking.check');
+Route::get('/cek-booking', [BookingController::class, 'check'])->name('booking.check');
+Route::post('/cek-booking', [BookingController::class, 'recover'])->middleware('throttle:6,1')->name('booking.recover');
 Route::get('/verifikasi/tiket/{code}', [DocumentController::class, 'verifyTicket'])->name('verify.ticket');
 Route::get('/verifikasi/faktur/{number}', [DocumentController::class, 'verifyInvoice'])->name('verify.invoice');
 Route::post('/payments/midtrans/webhook', [PaymentController::class, 'webhook'])->name('payments.webhook');
@@ -33,9 +34,11 @@ Route::middleware('auth')->group(function () {
     Route::get('/profil', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::put('/profil', [ProfileController::class, 'update'])->name('profile.update');
     Route::get('/akun', [BookingController::class, 'index'])->name('customer.dashboard');
-    Route::post('/pesanan', [BookingController::class, 'store'])->name('bookings.store');
-    Route::get('/pesanan/{booking}', [BookingController::class, 'show'])->name('bookings.show');
     Route::post('/pesanan/{booking}/ulasan', [ReviewController::class, 'store'])->name('reviews.store');
+});
+Route::middleware('cache.headers:private;no_store')->group(function () {
+    Route::post('/pesanan', [BookingController::class, 'store'])->middleware('throttle:20,1')->name('bookings.store');
+    Route::get('/pesanan/{booking}', [BookingController::class, 'show'])->name('bookings.show');
     Route::post('/pesanan/{booking}/batal', [BookingController::class, 'cancel'])->name('bookings.cancel');
     Route::post('/pesanan/{booking}/bayar', [PaymentController::class, 'choose'])->name('payments.choose');
     Route::post('/pembayaran/{payment}/bukti', [PaymentController::class, 'proof'])->name('payments.proof');
