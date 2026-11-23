@@ -1,0 +1,1 @@
+@extends('layouts.app') @section('title','Verifikasi Dokumen') @section('content')<div class="page max-w-lg text-center"><div class="rounded-3xl bg-white p-10"><div class="text-5xl">{{ $valid?'✓':'×' }}</div><h1 class="heading mt-4">{{ $label }} {{ $valid?'valid':'tidak aktif' }}</h1><p class="mt-3 text-slate-600">{{ $number }}</p></div></div>@endsection

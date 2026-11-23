@@ -1,0 +1,1 @@
+@extends('layouts.app') @section('title',$title) @section('content')<div class="page max-w-3xl"><span class="eyebrow">INFORMASI PERJALANAN</span><h1 class="heading mt-2">{{ $title }}</h1><div class="mt-7 rounded-3xl bg-white p-8 leading-8 text-slate-700 whitespace-pre-line">{{ $body ?: 'Informasi ini sedang disiapkan oleh pengelola travel.' }}</div></div>@endsection
